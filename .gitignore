@@ -1,0 +1,31 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Docker and Airflow runtime files
+logs/
+config/airflow.cfg
+plugins/
+postgres-db-volume/
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Local data and generated artifacts
+data/raw/
+data/processed/
+*.sqlite
+*.db
+*.log
+*.docx
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
