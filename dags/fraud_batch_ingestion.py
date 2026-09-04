@@ -40,14 +40,14 @@ COLUMN_MAPPING = {
     "step": "STEP",
     "type": "TYPE",
     "amount": "AMOUNT",
-    "nameOrig": "NAME_ORIG",
-    "oldbalanceOrg": "OLDBALANCE_ORG",
-    "newbalanceOrig": "NEWBALANCE_ORIG",
-    "nameDest": "NAME_DEST",
-    "oldbalanceDest": "OLDBALANCE_DEST",
-    "newbalanceDest": "NEWBALANCE_DEST",
-    "isFraud": "IS_FRAUD",
-    "isFlaggedFraud": "IS_FLAGGED_FRAUD",
+    "nameOrig": "NAMEORIG",
+    "oldbalanceOrg": "OLDBALANCEORG",
+    "newbalanceOrig": "NEWBALANCEORIG",
+    "nameDest": "NAMEDEST",
+    "oldbalanceDest": "OLDBALANCEDEST",
+    "newbalanceDest": "NEWBALANCEDEST",
+    "isFraud": "ISFRAUD",
+    "isFlaggedFraud": "ISFLAGGEDFRAUD",
 }
 
 
@@ -72,14 +72,14 @@ def fraud_batch_ingestion():
                 STEP                INTEGER,
                 TYPE                STRING,
                 AMOUNT              FLOAT,
-                NAME_ORIG           STRING,
-                OLDBALANCE_ORG      FLOAT,
-                NEWBALANCE_ORIG     FLOAT,
-                NAME_DEST           STRING,
-                OLDBALANCE_DEST     FLOAT,
-                NEWBALANCE_DEST     FLOAT,
-                IS_FRAUD            INTEGER,
-                IS_FLAGGED_FRAUD    INTEGER,
+                NAMEORIG            STRING,
+                OLDBALANCEORG       FLOAT,
+                NEWBALANCEORIG      FLOAT,
+                NAMEDEST            STRING,
+                OLDBALANCEDEST      FLOAT,
+                NEWBALANCEDEST      FLOAT,
+                ISFRAUD             INTEGER,
+                ISFLAGGEDFRAUD      INTEGER,
                 INGESTION_TIMESTAMP TIMESTAMP_NTZ,
                 SOURCE_FILE         STRING,
                 BATCH_ID            STRING
@@ -126,40 +126,46 @@ def fraud_batch_ingestion():
 
     @task
     def load_csv_to_snowflake(**context) -> dict:
-        """Chunking parquet -> PUT -> COPY INTO avec lineage et audit complet."""
+        """Chunking -> pandas -> write_pandas (INSERT batch optimisé, pas de PUT/S3)."""
+        from snowflake.connector.pandas_tools import write_pandas
+        
         batch_id = str(uuid.uuid4())
         run_date = context["ds"]
         start_time = time.time()
 
         hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
         conn = hook.get_conn()
-        cursor = conn.cursor()
-
+        
         total_rows = 0
         status = "failed"
 
         try:
             for i, chunk in enumerate(pd.read_csv(CSV_PATH, chunksize=CHUNK_SIZE)):
                 chunk = chunk.rename(columns=COLUMN_MAPPING)
-                chunk["INGESTION_TIMESTAMP"] = pd.Timestamp.utcnow()
+                chunk["INGESTION_TIMESTAMP"] = pd.Timestamp.utcnow().tz_localize(None)
                 chunk["SOURCE_FILE"] = os.path.basename(CSV_PATH)
                 chunk["BATCH_ID"] = batch_id
 
-                tmp_path = f"{TMP_DIR}/transactions_{batch_id}_{i}.parquet"
-                chunk.to_parquet(tmp_path, index=False)
-
-                cursor.execute(
-                    f"PUT file://{tmp_path} @{DATABASE}.{RAW_SCHEMA}.{STAGE} OVERWRITE = TRUE"
+                # write_pandas : crée table temp + COPY INTO interne, pas de PUT vers S3
+                success, num_chunks, num_rows, output = write_pandas(
+                    conn=conn,
+                    df=chunk,
+                    table_name=TABLE,
+                    database=DATABASE,
+                    schema=RAW_SCHEMA,
+                    quote_identifiers=False,
+                    auto_create_table=False,   # table existe déjà
+                    overwrite=False,           # append
+                    use_logical_type=True,
                 )
-                cursor.execute(f"""
-                    COPY INTO {DATABASE}.{RAW_SCHEMA}.{TABLE}
-                    FROM @{DATABASE}.{RAW_SCHEMA}.{STAGE}/transactions_{batch_id}_{i}.parquet
-                    FILE_FORMAT = (TYPE = 'PARQUET')
-                    MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
-                """)
 
-                total_rows += len(chunk)
-                os.remove(tmp_path)
+                if not success:
+                    raise AirflowFailException(
+                        f"Echec du chargement du chunk {i} dans {DATABASE}.{RAW_SCHEMA}.{TABLE}: {output}"
+                    )
+                
+                total_rows += num_rows
+                print(f"[chunk {i}] {num_rows} lignes insérées (total: {total_rows})")
 
             status = "success"
 
@@ -168,10 +174,9 @@ def fraud_batch_ingestion():
 
         finally:
             duration = time.time() - start_time
-            cursor.close()
             conn.close()
 
-            # Log ALWAYS (success or failure)
+            # Log audit (success ou failure)
             hook.run(
                 f"""
                 INSERT INTO {DATABASE}.{RAW_SCHEMA}.PIPELINE_RUNS
@@ -195,7 +200,7 @@ def fraud_batch_ingestion():
         total_rows, fraud_count, null_steps, null_amounts = hook.get_first(f"""
             SELECT
                 COUNT(*)                                    AS total_rows,
-                SUM(IS_FRAUD)                               AS fraud_count,
+                SUM(ISFRAUD)                                 AS fraud_count,
                 SUM(CASE WHEN STEP IS NULL THEN 1 ELSE 0 END)   AS null_steps,
                 SUM(CASE WHEN AMOUNT IS NULL THEN 1 ELSE 0 END) AS null_amounts
             FROM {DATABASE}.{RAW_SCHEMA}.{TABLE}
