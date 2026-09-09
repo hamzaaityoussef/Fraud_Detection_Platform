@@ -22,7 +22,8 @@ from airflow.exceptions import AirflowFailException
 
 CSV_PATH = "/opt/airflow/data/PS_20174392719_1491204439457_log.csv"
 CHUNK_SIZE = 200_000
-INGESTION_MAX_ROWS = int(os.getenv("INGESTION_MAX_ROWS", "0")) or None
+INGESTION_MAX_ROWS = 100
+# INGESTION_MAX_ROWS = int(os.getenv("INGESTION_MAX_ROWS", "0")) or None
 TMP_DIR = "/tmp"
 
 SNOWFLAKE_CONN_ID = "snowflake_default"
@@ -138,7 +139,7 @@ def fraud_batch_ingestion():
 
         total_rows = 0
         status = "failed"
-
+        # cursor.execute("ALTER SESSION SET TIMEZONE = 'Africa/Casablanca'")
         try:
             for i, chunk in enumerate(
                 pd.read_csv(
@@ -148,7 +149,6 @@ def fraud_batch_ingestion():
                 )
             ):
                 chunk = chunk.rename(columns=COLUMN_MAPPING)
-                chunk["INGESTION_TIMESTAMP"] = pd.Timestamp.utcnow().tz_localize(None)
                 chunk["SOURCE_FILE"] = os.path.basename(CSV_PATH)
                 chunk["BATCH_ID"] = batch_id
 
@@ -159,11 +159,44 @@ def fraud_batch_ingestion():
                     f"PUT file://{tmp_path} @{DATABASE}.{RAW_SCHEMA}.{STAGE} "
                     "OVERWRITE = TRUE AUTO_COMPRESS = FALSE"
                 )
+
                 cursor.execute(f"""
                     COPY INTO {DATABASE}.{RAW_SCHEMA}.{TABLE}
-                    FROM @{DATABASE}.{RAW_SCHEMA}.{STAGE}/transactions_{batch_id}_{i}.parquet
+                    (
+                        STEP,
+                        TYPE,
+                        AMOUNT,
+                        NAMEORIG,
+                        OLDBALANCEORG,
+                        NEWBALANCEORIG,
+                        NAMEDEST,
+                        OLDBALANCEDEST,
+                        NEWBALANCEDEST,
+                        ISFRAUD,
+                        ISFLAGGEDFRAUD,
+                        INGESTION_TIMESTAMP,
+                        SOURCE_FILE,
+                        BATCH_ID
+                    )
+                    FROM (
+                        SELECT
+                            $1:STEP::INTEGER,
+                            $1:TYPE::VARCHAR,
+                            $1:AMOUNT::FLOAT,
+                            $1:NAMEORIG::VARCHAR,
+                            $1:OLDBALANCEORG::FLOAT,
+                            $1:NEWBALANCEORIG::FLOAT,
+                            $1:NAMEDEST::VARCHAR,
+                            $1:OLDBALANCEDEST::FLOAT,
+                            $1:NEWBALANCEDEST::FLOAT,
+                            $1:ISFRAUD::INTEGER,
+                            $1:ISFLAGGEDFRAUD::INTEGER,
+                            CURRENT_TIMESTAMP()::TIMESTAMP_NTZ,
+                            $1:SOURCE_FILE::VARCHAR,
+                            $1:BATCH_ID::VARCHAR
+                        FROM @{DATABASE}.{RAW_SCHEMA}.{STAGE}/transactions_{batch_id}_{i}.parquet
+                    )
                     FILE_FORMAT = (TYPE = 'PARQUET')
-                    MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
                 """)
 
                 total_rows += len(chunk)
