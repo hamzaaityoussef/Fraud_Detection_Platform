@@ -22,6 +22,7 @@ from airflow.exceptions import AirflowFailException
 
 CSV_PATH = "/opt/airflow/data/PS_20174392719_1491204439457_log.csv"
 CHUNK_SIZE = 200_000
+INGESTION_MAX_ROWS = int(os.getenv("INGESTION_MAX_ROWS", "0")) or None
 TMP_DIR = "/tmp"
 
 SNOWFLAKE_CONN_ID = "snowflake_default"
@@ -139,7 +140,13 @@ def fraud_batch_ingestion():
         status = "failed"
 
         try:
-            for i, chunk in enumerate(pd.read_csv(CSV_PATH, chunksize=CHUNK_SIZE)):
+            for i, chunk in enumerate(
+                pd.read_csv(
+                    CSV_PATH,
+                    chunksize=CHUNK_SIZE,
+                    nrows=INGESTION_MAX_ROWS,
+                )
+            ):
                 chunk = chunk.rename(columns=COLUMN_MAPPING)
                 chunk["INGESTION_TIMESTAMP"] = pd.Timestamp.utcnow().tz_localize(None)
                 chunk["SOURCE_FILE"] = os.path.basename(CSV_PATH)
