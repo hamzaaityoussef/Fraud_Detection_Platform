@@ -126,16 +126,15 @@ def fraud_batch_ingestion():
 
     @task
     def load_csv_to_snowflake(**context) -> dict:
-        """Chunking -> pandas -> write_pandas (INSERT batch optimisé, pas de PUT/S3)."""
-        from snowflake.connector.pandas_tools import write_pandas
-        
+        """Chunking parquet -> PUT -> COPY INTO avec lineage et audit complet."""
         batch_id = str(uuid.uuid4())
         run_date = context["ds"]
         start_time = time.time()
 
         hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
         conn = hook.get_conn()
-        
+        cursor = conn.cursor()
+
         total_rows = 0
         status = "failed"
 
@@ -146,26 +145,22 @@ def fraud_batch_ingestion():
                 chunk["SOURCE_FILE"] = os.path.basename(CSV_PATH)
                 chunk["BATCH_ID"] = batch_id
 
-                # write_pandas : crée table temp + COPY INTO interne, pas de PUT vers S3
-                success, num_chunks, num_rows, output = write_pandas(
-                    conn=conn,
-                    df=chunk,
-                    table_name=TABLE,
-                    database=DATABASE,
-                    schema=RAW_SCHEMA,
-                    quote_identifiers=False,
-                    auto_create_table=False,   # table existe déjà
-                    overwrite=False,           # append
-                    use_logical_type=True,
-                )
+                tmp_path = f"{TMP_DIR}/transactions_{batch_id}_{i}.parquet"
+                chunk.to_parquet(tmp_path, index=False)
 
-                if not success:
-                    raise AirflowFailException(
-                        f"Echec du chargement du chunk {i} dans {DATABASE}.{RAW_SCHEMA}.{TABLE}: {output}"
-                    )
-                
-                total_rows += num_rows
-                print(f"[chunk {i}] {num_rows} lignes insérées (total: {total_rows})")
+                cursor.execute(
+                    f"PUT file://{tmp_path} @{DATABASE}.{RAW_SCHEMA}.{STAGE} "
+                    "OVERWRITE = TRUE AUTO_COMPRESS = FALSE"
+                )
+                cursor.execute(f"""
+                    COPY INTO {DATABASE}.{RAW_SCHEMA}.{TABLE}
+                    FROM @{DATABASE}.{RAW_SCHEMA}.{STAGE}/transactions_{batch_id}_{i}.parquet
+                    FILE_FORMAT = (TYPE = 'PARQUET')
+                    MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
+                """)
+
+                total_rows += len(chunk)
+                os.remove(tmp_path)
 
             status = "success"
 
@@ -174,9 +169,10 @@ def fraud_batch_ingestion():
 
         finally:
             duration = time.time() - start_time
+            cursor.close()
             conn.close()
 
-            # Log audit (success ou failure)
+            # Log ALWAYS (success or failure)
             hook.run(
                 f"""
                 INSERT INTO {DATABASE}.{RAW_SCHEMA}.PIPELINE_RUNS
