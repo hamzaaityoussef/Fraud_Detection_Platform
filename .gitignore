@@ -18,15 +18,16 @@ venv/
 env/
 
 # Local data and generated artifacts
-data/raw/
-data/processed/
+# data/raw/
+# data/processed/
 *.sqlite
 *.db
 *.log
 *.docx
+*.csv
 
 # OS and editor files
 .DS_Store
 Thumbs.db
 .vscode/
-/data
+# /data
