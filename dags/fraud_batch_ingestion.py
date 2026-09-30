@@ -47,7 +47,7 @@ TABLE = "RAW_TRANSACTIONS"
 STAGE = "TRANSACTIONS_STAGE"
 
 
-RAW_TRANSACTIONS_ASSET = Asset(f"snowflake://TCB14021/{DATABASE}/{RAW_SCHEMA}/{TABLE}")
+RAW_TRANSACTIONS_ASSET = Asset(f"snowflake://{SNOWFLAKE_ACCOUNT}/{DATABASE}/{RAW_SCHEMA}/{TABLE}")
 
 DEFAULT_ARGS = {
     "owner": "hamza",
@@ -196,7 +196,9 @@ def fraud_batch_ingestion():
                 ISFLAGGEDFRAUD      INTEGER,
                 INGESTION_TIMESTAMP TIMESTAMP_NTZ,
                 SOURCE_FILE         STRING,
-                BATCH_ID            STRING
+                BATCH_ID            STRING,
+                EVENT_ID            STRING,
+                INGESTION_SOURCE    STRING
             )
         """)
 
@@ -289,6 +291,17 @@ def fraud_batch_ingestion():
             dtype=DTYPE_MAP,
         )
         chunk = chunk.rename(columns=COLUMN_MAPPING)
+        first_data_row = chunk_meta["skiprows"] - 1
+        chunk["EVENT_ID"] = [
+            str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"batch:{os.path.abspath(csv_path)}:{row_number}",
+                )
+            )
+            for row_number in range(first_data_row, first_data_row + len(chunk))
+        ]
+        chunk["INGESTION_SOURCE"] = "batch"
         chunk["SOURCE_FILE"] = os.path.basename(csv_path)
         chunk["BATCH_ID"] = batch_id
 
@@ -321,8 +334,8 @@ def fraud_batch_ingestion():
                         (
                             STEP, TYPE, AMOUNT, NAMEORIG, OLDBALANCEORG,
                             NEWBALANCEORIG, NAMEDEST, OLDBALANCEDEST,
-                            NEWBALANCEDEST, ISFRAUD, ISFLAGGEDFRAUD,
-                            INGESTION_TIMESTAMP, SOURCE_FILE, BATCH_ID
+                            NEWBALANCEDEST, ISFRAUD, ISFLAGGEDFRAUD, EVENT_ID,
+                            INGESTION_SOURCE, INGESTION_TIMESTAMP, SOURCE_FILE, BATCH_ID
                         )
                         FROM (
                             SELECT
@@ -337,12 +350,14 @@ def fraud_batch_ingestion():
                                 $1:NEWBALANCEDEST::FLOAT,
                                 $1:ISFRAUD::INTEGER,
                                 $1:ISFLAGGEDFRAUD::INTEGER,
-                                CURRENT_TIMESTAMP()::TIMESTAMP_NTZ,
+                                $1:EVENT_ID::VARCHAR,
+                                $1:INGESTION_SOURCE::VARCHAR,
+                                CONVERT_TIMEZONE('Africa/Casablanca', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ,
                                 $1:SOURCE_FILE::VARCHAR,
                                 $1:BATCH_ID::VARCHAR
                             FROM @{DATABASE}.{RAW_SCHEMA}.{STAGE}
                         )
-                        PATTERN = '.*{batch_id}_chunk_.*\\\\.parquet'
+                        PATTERN = '.*{batch_id}_chunk_.*[.]parquet'
                         FILE_FORMAT = (TYPE = 'PARQUET')
                         PURGE = TRUE
                     """)

@@ -84,6 +84,7 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/kafka:/opt/airflow/kafka:ro
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -360,6 +361,12 @@ services:
       KAFKA_NUM_PARTITIONS: 3
     volumes:
       - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
     restart: always
  
   kafka-ui:
@@ -373,6 +380,40 @@ services:
     depends_on:
       - kafka
     restart: always      
+
+  kafka-snowflake-consumer:
+    <<: *airflow-common
+    entrypoint: ["python"]
+    command: ["-u", "/opt/airflow/kafka/snowflake_consumer.py"]
+    environment:
+      <<: *airflow-common-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: fraud.transactions.v1
+      KAFKA_CONSUMER_GROUP: fraud-snowflake-raw-v1
+      KAFKA_FLUSH_SIZE: ${KAFKA_FLUSH_SIZE:-100}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  kafka-csv-producer:
+    <<: *airflow-common
+    profiles: ["tools"]
+    entrypoint: ["python"]
+    command: ["-u", "/opt/airflow/kafka/csv_producer.py"]
+    environment:
+      <<: *airflow-common-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: fraud.transactions.v1
+      KAFKA_CSV_PATH: ${KAFKA_CSV_PATH:-/opt/airflow/data/test_data.csv}
+      KAFKA_MAX_ROWS: ${KAFKA_MAX_ROWS:-0}
+      KAFKA_DELAY_SECONDS: ${KAFKA_DELAY_SECONDS:-0.05}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
 
 volumes:
   postgres-db-volume:

@@ -10,3 +10,5 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 USER airflow
+
+RUN pip install --no-cache-dir kafka-python "chardet<6"
